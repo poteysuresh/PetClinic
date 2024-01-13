@@ -1,0 +1,90 @@
+pipeline {
+    
+    agent {
+        label 'agent-1'
+    }
+    
+    tools {
+          maven 'MAVEN_3'
+          jdk 'JAVA8'
+    }
+
+    options {
+        buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '10')
+        disableConcurrentBuilds()
+        timestamps()
+        ansiColor('xterm')
+
+    }
+
+    parameters {
+        string description: 'The GitHub Branch Name', name: 'branch_name'
+    }
+
+    stages {
+        stage('Code Checkout'){
+            steps {
+                deleteDir()
+                echo "code checkout"
+                git branch: '$branch_name', credentialsId: 'github-creds', url: "https://github.com/gkdevops/PetClinic.git"
+            }
+        }
+
+        stage('Secrets Detection'){
+            steps {
+                sh "gitleaks detect --report-path gitleaks-report.json"
+            }
+        }
+
+        stage('Build & Unit Tests'){
+            steps {
+                sh "mvn test"
+            }
+            post {
+                always {
+                    echo "Build & Unit Tests executed "
+                }
+                success {
+                    echo "Build & Unit Tests completed successfuly"                        
+                }
+            }
+        }
+
+        stage('SonarQube Scan'){
+          environment {
+            SCANNER_HOME = tool 'sonar_scanner'
+          }
+          steps {
+            withSonarQubeEnv (installationName: 'SonarQube') {
+              sh "${SCANNER_HOME}/bin/sonar-scanner -Dproject.settings=sonar-project.properties"
+            }
+          }
+        }
+
+        stage('Upload Artifact'){
+            steps {
+                sh "mvn -Dtests.skip=false deploy"
+            }
+        }
+        stage('Deploy to Dev'){
+            steps {
+                echo "Ansible Deploying to Dev environment"
+                ansiblePlaybook installation: 'ANSIBLE', inventory: '/home/ubuntu/ansible/inventory', playbook: 'deploy.yaml', sudoUser: null
+            }
+        }
+    }
+    post {
+        always {
+            echo "I will always run"
+        }
+        failure {
+            echo "I will run only on failure"
+        }
+        success {
+            echo "I will run if the job is successful"
+        }
+        aborted {
+            echo "I will run only when job is aborted"
+        }
+    }
+}

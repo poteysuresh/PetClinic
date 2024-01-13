@@ -1,0 +1,100 @@
+pipeline {
+    
+    agent {
+        label 'agent-1'
+    }
+    
+    tools {
+          maven 'MAVEN_3'
+          jdk 'JAVA8'
+    }
+
+    options {
+        buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '10')
+        disableConcurrentBuilds()
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    environment {
+        registry_url="ec2-34-238-240-54.compute-1.amazonaws.com:8082"
+
+    }
+
+    parameters {
+        string description: 'The GitHub Branch Name', name: 'branch_name'
+        string description: 'The Environment to Deploy', name: 'env_name'
+    }
+
+    stages {
+        stage('Code Checkout'){
+            steps {
+                deleteDir()
+                echo "code checkout"
+                git branch: '$branch_name', credentialsId: 'github-creds', url: "https://github.com/gkdevops/PetClinic.git"
+            }
+        }
+
+        stage('Secrets Detection'){
+            steps {
+                sh "gitleaks detect --report-path gitleaks-report.json"
+            }
+        }
+
+        stage('Unit Tests & Package'){
+            steps {
+                sh "mvn package"
+            }
+        }
+
+        stage('SonarQube Scan'){
+            when {
+                expression { params.env_name == 'dev' }
+            }
+            environment {
+                SCANNER_HOME = tool 'sonar_scanner'
+            }
+            steps {
+                withSonarQubeEnv (installationName: 'SonarQube') {
+                    sh "${SCANNER_HOME}/bin/sonar-scanner -Dproject.settings=sonar-project.properties"
+                }
+            }
+        }
+
+        stage('Build & Upload Docker'){
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'docker-registry', passwordVariable: 'JFROGPASSWORD', usernameVariable: 'JFROGUSER')]) {
+                    sh '''
+                    IMAGE_TAG=`git rev-parse --short HEAD`
+                    sudo docker login -u $JFROGUSER -p $JFROGPASSWORD $registry_url
+                    sudo docker image build -t $registry_url/mypets-docker/petclinic:${IMAGE_TAG} .
+                    sudo docker image push $registry_url/mypets-docker/petclinic:${IMAGE_TAG}
+                    '''
+                }
+            }
+        }
+        stage('Update Kubernetes config'){
+            steps {
+                echo "Update K8S YAML files for Dev env"
+                sh '''
+                IMAGE_TAG=`git rev-parse --short HEAD`
+                cd cicd
+                OLDIMAGE=`cat deployment.yaml | grep "8082" | awk -F ":" '{print $NF}'`
+                sed -i "s/$OLDIMAGE/$IMAGE_TAG/" deployment.yaml
+                '''
+            }
+        }
+
+        stage('Deploy to Dev'){
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig-dev', variable: 'kubeconfig')]) {
+                    sh '''
+                    cd cicd/
+                    kubectl apply -f deployment.yaml --kubeconfig $kubeconfig
+                    '''
+                }
+            }
+        }
+
+    }
+}
